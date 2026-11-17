@@ -6,7 +6,7 @@
   var AD_MARK = "data-x-ad-media-hidden";
   var STYLE_ID = "x-hide-video-style";
   var AD_LABEL = /^(?:ad|promoted|sponsored|political ad)$/i;
-  var POST_IMAGE = /\/media\/|amplify_video|ext_tw_video|tweet_video|card_img|video\.twimg\.com/i;
+  var POST_IMAGE = /\/media\/|\/ad_img\/|amplify_video|ext_tw_video|tweet_video|card_img|video\.twimg\.com/i;
   var PROFILE_IMAGE = /profile_images|profile_banners|emoji|abs\.twimg\.com/i;
   var VIDEO_URL = /ext_tw_video|amplify_video|tweet_video|video\.twimg\.com/i;
   var FIND = [
@@ -365,23 +365,54 @@
     return false;
   }
 
-  function mediaTarget(el) {
-    var blob =
+  function mediaBlob(el) {
+    return (
       (el.getAttribute("src") || "") +
       " " +
       (el.getAttribute("srcset") || "") +
       " " +
       (el.getAttribute("poster") || "") +
       " " +
-      (el.getAttribute("style") || "");
-    if (el.tagName === "IMG" && PROFILE_IMAGE.test(blob)) return null;
-    var frame = el.closest(
-      '.aspect-video, [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"]'
+      (el.getAttribute("style") || "")
     );
-    if (frame) return frame;
-    if (el.tagName === "VIDEO") return el;
-    if (POST_IMAGE.test(blob) || VIDEO_URL.test(blob)) return el;
-    return null;
+  }
+
+  // Avatars and tiny icons stay. Every other image in an ad is part of the
+  // creative, including a shop hero with a strip of smaller product images.
+  function isContentMedia(el) {
+    var tag = el.tagName;
+    var blob = mediaBlob(el);
+    if (PROFILE_IMAGE.test(blob)) return false;
+    if (el.getAttribute("width") === "1" || el.getAttribute("height") === "1") return false;
+    var profileLink = el.closest("a[href]");
+    if (profileLink && /^\/[A-Za-z0-9_]{1,15}\/?$/.test(profileLink.getAttribute("href") || "")) return false;
+    var cls = typeof el.className === "string" ? el.className : "";
+    if (tag === "IMG" && /(^|\s)rounded-full(\s|$)/.test(cls) && !POST_IMAGE.test(blob)) return false;
+    if (tag === "VIDEO") return true;
+    if (tag === "IMG") return true;
+    return /background-image\s*:\s*url\(/i.test(el.getAttribute("style") || "");
+  }
+
+  function plainTextLength(el) {
+    var text = "";
+    try {
+      text = el.innerText;
+    } catch (e) {}
+    if (!text) text = el.textContent || "";
+    return String(text).replace(/\s+/g, " ").trim().length;
+  }
+
+  // Climb to the block that holds the hero and the thumbnail strip, and stop
+  // before the account name, the Ad label's row, or the post text.
+  function mediaFrame(el, post) {
+    var node = el;
+    while (node.parentElement && node.parentElement !== post && post.contains(node.parentElement)) {
+      var parent = node.parentElement;
+      if (plainTextLength(parent) > 120) break;
+      if (parent.querySelector('button[aria-label="More"], button[aria-label="More options"], [data-testid="caret"]')) break;
+      node = parent;
+    }
+    return node === post ? el : node;
   }
 
   function hideAdMedia() {
@@ -390,15 +421,13 @@
     for (var i = 0; i < posts.length; i++) {
       var post = posts[i];
       if (!isAd(post)) continue;
-      var nodes = post.querySelectorAll(
-        'video, img, [data-testid="tweetPhoto"], [data-testid="card.wrapper"], [data-testid="videoPlayer"], [data-testid="videoComponent"], .aspect-video, [style*="twimg"], [style*="video.twimg"]'
-      );
+      var nodes = post.querySelectorAll("video, img, [style*='background-image'], [style*='background']");
       for (var j = 0; j < nodes.length; j++) {
-        var target = mediaTarget(nodes[j]);
-        if (!target || hidden.indexOf(target) !== -1) continue;
-        var owner = target.closest("article");
+        if (!isContentMedia(nodes[j])) continue;
+        var owner = nodes[j].closest("article");
         if (owner && owner !== post && !post.contains(owner)) continue;
-        hidden.push(target);
+        var target = mediaFrame(nodes[j], post);
+        if (target && target !== post && hidden.indexOf(target) === -1) hidden.push(target);
       }
     }
     var marked = document.querySelectorAll("[" + AD_MARK + "]");
