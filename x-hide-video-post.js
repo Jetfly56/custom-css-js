@@ -3,7 +3,11 @@
   window.__xHideVideoPosts = true;
 
   var MARK = "data-x-video-hidden";
+  var AD_MARK = "data-x-ad-media-hidden";
   var STYLE_ID = "x-hide-video-style";
+  var AD_LABEL = /^(?:ad|promoted|sponsored|political ad)$/i;
+  var POST_IMAGE = /\/media\/|amplify_video|ext_tw_video|tweet_video|card_img|video\.twimg\.com/i;
+  var PROFILE_IMAGE = /profile_images|profile_banners|emoji|abs\.twimg\.com/i;
   var VIDEO_URL = /ext_tw_video|amplify_video|tweet_video|video\.twimg\.com/i;
   var FIND = [
     "video",
@@ -35,7 +39,7 @@
   // rule would also remove videos from accounts you follow. The peek
   // attribute hides the More menu while it is opened just long enough to read.
   var CSS =
-    "[" + MARK + '="1"]{display:none !important;}' +
+    "[" + MARK + '="1"],[' + AD_MARK + '="1"]{display:none !important;}' +
     'html[data-x-follow-peek] [role="menu"],' +
     'html[data-x-follow-peek] [data-slot="xds-menu-content"]{' +
     "visibility:hidden !important;pointer-events:none !important;}";
@@ -132,6 +136,10 @@
   }
 
   function outerArticle(root) {
+    if (root.tagName === "ARTICLE") {
+      var above = root.parentElement && root.parentElement.closest("article");
+      if (!above) return root;
+    }
     var articles = root.querySelectorAll("article");
     for (var i = 0; i < articles.length; i++) {
       var parentArticle = articles[i].parentElement && articles[i].parentElement.closest("article");
@@ -319,7 +327,94 @@
     setTimeout(attempt, 40);
   }
 
+  // The visible "Ad" / "Promoted" label. A whole post or a sentence that
+  // merely contains those words does not count; the label itself is short.
+  function isAdLabel(el) {
+    var aria = (el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+    if (AD_LABEL.test(aria)) return true;
+    if (el.children.length > 1) return false;
+    var text = "";
+    try {
+      text = el.innerText;
+    } catch (e) {}
+    if (!text) {
+      try {
+        text = el.textContent || "";
+      } catch (e2) {}
+    }
+    text = String(text).replace(/\s+/g, " ").trim();
+    if (!AD_LABEL.test(text)) return false;
+    var parent = el.parentElement;
+    var parentText = parent ? String(parent.textContent || "").replace(/\s+/g, " ").trim() : text;
+    return parentText.length <= 160;
+  }
+
+  function isAd(root) {
+    if (root.closest('[data-testid="placementTracking"], [data-testid="promotedIndicator"]')) return true;
+    if (root.querySelector('[data-testid="placementTracking"], [data-testid="promotedIndicator"]')) return true;
+    var article = outerArticle(root);
+    var scope = article || root;
+    var nodes = scope.querySelectorAll("span, a, div, button, p");
+    for (var i = 0; i < nodes.length; i++) {
+      if (article) {
+        var owner = nodes[i].closest("article");
+        if (owner && owner !== article) continue;
+      }
+      if (isAdLabel(nodes[i])) return true;
+    }
+    return false;
+  }
+
+  function mediaTarget(el) {
+    var blob =
+      (el.getAttribute("src") || "") +
+      " " +
+      (el.getAttribute("srcset") || "") +
+      " " +
+      (el.getAttribute("poster") || "") +
+      " " +
+      (el.getAttribute("style") || "");
+    if (el.tagName === "IMG" && PROFILE_IMAGE.test(blob)) return null;
+    var frame = el.closest(
+      '.aspect-video, [data-testid="tweetPhoto"], [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="card.wrapper"]'
+    );
+    if (frame) return frame;
+    if (el.tagName === "VIDEO") return el;
+    if (POST_IMAGE.test(blob) || VIDEO_URL.test(blob)) return el;
+    return null;
+  }
+
+  function hideAdMedia() {
+    var posts = document.querySelectorAll('article, [data-testid="cellInnerDiv"]');
+    var hidden = [];
+    for (var i = 0; i < posts.length; i++) {
+      var post = posts[i];
+      if (!isAd(post)) continue;
+      var nodes = post.querySelectorAll(
+        'video, img, [data-testid="tweetPhoto"], [data-testid="card.wrapper"], [data-testid="videoPlayer"], [data-testid="videoComponent"], .aspect-video, [style*="twimg"], [style*="video.twimg"]'
+      );
+      for (var j = 0; j < nodes.length; j++) {
+        var target = mediaTarget(nodes[j]);
+        if (!target || hidden.indexOf(target) !== -1) continue;
+        var owner = target.closest("article");
+        if (owner && owner !== post && !post.contains(owner)) continue;
+        hidden.push(target);
+      }
+    }
+    var marked = document.querySelectorAll("[" + AD_MARK + "]");
+    for (var k = 0; k < marked.length; k++) {
+      if (hidden.indexOf(marked[k]) === -1) marked[k].removeAttribute(AD_MARK);
+    }
+    for (var n = 0; n < hidden.length; n++) {
+      if (hidden[n].getAttribute(AD_MARK) !== "1") hidden[n].setAttribute(AD_MARK, "1");
+      var clips = hidden[n].tagName === "VIDEO" ? [hidden[n]] : hidden[n].querySelectorAll("video");
+      for (var c = 0; c < clips.length; c++) pause(clips[c]);
+    }
+  }
+
   function shouldHide(root) {
+    // Ad images and videos are removed on their own, including accounts you follow.
+    if (isAd(root)) return false;
     var article = outerArticle(root);
     var onPost = controlsIn(root, article);
     if (onPost === "following") return false;
@@ -359,6 +454,7 @@
       var clips = roots[k].querySelectorAll("video");
       for (var n = 0; n < clips.length; n++) pause(clips[n]);
     }
+    hideAdMedia();
   }
 
   var timer = 0;
@@ -379,7 +475,7 @@
       "play",
       function (event) {
         var video = event.target;
-        if (video && video.tagName === "VIDEO" && video.closest("[" + MARK + "]")) pause(video);
+        if (video && video.tagName === "VIDEO" && video.closest("[" + MARK + "], [" + AD_MARK + "]")) pause(video);
       },
       true
     );
