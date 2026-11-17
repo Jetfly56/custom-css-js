@@ -25,35 +25,9 @@
     '[data-testid="tweetPhoto"] button[aria-label]'
   ].join(",");
 
-  // Current x.com posts are <li><article> and the player is a <video> or a
-  // poster image. Older x.com used cellInnerDiv / videoPlayer. Hide the row
-  // for either shape. :has() covers posts added after this script runs.
-  var CSS = [
-    "[" + MARK + '="1"]',
-    '[data-testid="cellInnerDiv"]:has(video)',
-    '[data-testid="cellInnerDiv"]:has([data-testid="videoPlayer"])',
-    '[data-testid="cellInnerDiv"]:has([data-testid="videoComponent"])',
-    '[data-testid="cellInnerDiv"]:has(img[src*="ext_tw_video"])',
-    '[data-testid="cellInnerDiv"]:has(img[src*="amplify_video"])',
-    '[data-testid="cellInnerDiv"]:has(img[src*="tweet_video"])',
-    "li:has(article):has(video)",
-    'li:has(article):has([data-testid="videoPlayer"])',
-    'li:has(article):has([data-testid="videoComponent"])',
-    'li:has(article):has(img[src*="ext_tw_video"])',
-    'li:has(article):has(img[src*="amplify_video"])',
-    'li:has(article):has(img[src*="tweet_video"])',
-    'li:has(article):has([style*="ext_tw_video"])',
-    'li:has(article):has([style*="amplify_video"])',
-    'li:has(article):has([style*="tweet_video"])',
-    "li:has(article):has(.aspect-video button[aria-label])",
-    "article:not(li article):has(video)",
-    'article:not(li article):has([data-testid="videoPlayer"])',
-    'article:not(li article):has([data-testid="videoComponent"])',
-    'article:not(li article):has(img[src*="ext_tw_video"])',
-    'article:not(li article):has(img[src*="amplify_video"])',
-    'article:not(li article):has(img[src*="tweet_video"])',
-    "article:not(li article):has(.aspect-video button[aria-label])"
-  ].join(",") + "{display:none !important;}";
+  // Hide is applied only after the follow check, so a blanket :has(video)
+  // rule would also remove videos from accounts you follow.
+  var CSS = "[" + MARK + '="1"]{display:none !important;}';
 
   function ensureStyle() {
     if (document.getElementById(STYLE_ID)) return;
@@ -87,13 +61,91 @@
     } catch (e) {}
   }
 
+  // "Follow" / "Follow @name" means you do not follow them.
+  // "Following" / "Unfollow @name" means you do. Follower counts
+  // ("1 Following", "60.6M Followers") are links, not this control.
+  function followState(el) {
+    var href = el.getAttribute("href") || "";
+    if (/\/followers?\b|\/following\b|\/verified_followers\b/i.test(href)) return null;
+    var testid = el.getAttribute("data-testid") || "";
+    if (/-unfollow$/.test(testid)) return "following";
+    if (/-follow$/.test(testid)) return "not-following";
+    var icon = el.querySelector("[data-icon]");
+    var iconName = icon ? icon.getAttribute("data-icon") || "" : "";
+    if (iconName === "icon-person-following-fill") return "following";
+    if (iconName === "icon-person-follow") return "not-following";
+    var aria = (el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+    var text = "";
+    try {
+      text = el.innerText;
+    } catch (e) {}
+    if (!text) {
+      try {
+        text = el.textContent || "";
+      } catch (e2) {}
+    }
+    text = String(text).replace(/\s+/g, " ").trim();
+    if (/^following\b/i.test(aria) || /^unfollow\b/i.test(aria)) return "following";
+    if (/^follow(?: back)?(?: @|$)/i.test(aria)) return "not-following";
+    if (/^following$/i.test(text) || /^unfollow$/i.test(text)) return "following";
+    if (/^follow(?: back)?$/i.test(text)) return "not-following";
+    return null;
+  }
+
+  function controlsIn(scope, article) {
+    var nodes = scope.querySelectorAll('button, a[aria-label], [role="button"]');
+    var state = null;
+    for (var i = 0; i < nodes.length; i++) {
+      if (article) {
+        var owner = nodes[i].closest("article");
+        if (owner && owner !== article) continue;
+      }
+      var next = followState(nodes[i]);
+      if (next === "following") return "following";
+      if (next === "not-following") state = "not-following";
+    }
+    return state;
+  }
+
+  // A profile page puts Follow/Following in the header, not on each post.
+  function pageFollowState() {
+    var main = document.querySelector("main") || document.body;
+    var nodes = main.querySelectorAll('button, a[aria-label], [role="button"]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].closest('article, ul, aside, nav, [data-testid="cellInnerDiv"], [data-testid="sidebarColumn"]')) continue;
+      var state = followState(nodes[i]);
+      if (state) return state;
+    }
+    return null;
+  }
+
+  function shouldHide(root) {
+    var articles = root.querySelectorAll("article");
+    var article = null;
+    for (var i = 0; i < articles.length; i++) {
+      var parentArticle = articles[i].parentElement && articles[i].parentElement.closest("article");
+      if (!parentArticle || !root.contains(parentArticle)) {
+        article = articles[i];
+        break;
+      }
+    }
+    var onPost = controlsIn(root, article);
+    if (onPost === "following") return false;
+    if (onPost === "not-following") return true;
+    var onPage = pageFollowState();
+    if (onPage === "following") return false;
+    if (onPage === "not-following") return true;
+    // Home timeline posts from accounts you follow have no Follow button.
+    return false;
+  }
+
   function refresh() {
     ensureStyle();
     var roots = [];
     var nodes = document.querySelectorAll(FIND);
     for (var i = 0; i < nodes.length; i++) {
       var root = rootFor(nodes[i]);
-      if (roots.indexOf(root) === -1) roots.push(root);
+      if (roots.indexOf(root) === -1 && shouldHide(root)) roots.push(root);
     }
     var marked = document.querySelectorAll("[" + MARK + "]");
     for (var j = 0; j < marked.length; j++) {
@@ -101,9 +153,9 @@
     }
     for (var k = 0; k < roots.length; k++) {
       if (roots[k].getAttribute(MARK) !== "1") roots[k].setAttribute(MARK, "1");
+      var clips = roots[k].querySelectorAll("video");
+      for (var n = 0; n < clips.length; n++) pause(clips[n]);
     }
-    var videos = document.getElementsByTagName("video");
-    for (var n = 0; n < videos.length; n++) pause(videos[n]);
   }
 
   var timer = 0;
@@ -123,7 +175,8 @@
     document.addEventListener(
       "play",
       function (event) {
-        if (event.target && event.target.tagName === "VIDEO") pause(event.target);
+        var video = event.target;
+        if (video && video.tagName === "VIDEO" && video.closest("[" + MARK + "]")) pause(video);
       },
       true
     );
